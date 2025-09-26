@@ -1,6 +1,8 @@
 services:
   api:
-    build: ./api
+    build:
+      context: ./api
+      dockerfile: Dockerfile
     ports:
       - "8080:8080"
     volumes:
@@ -16,7 +18,9 @@ services:
       start_period: 60s
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      dockerfile: Dockerfile
     ports:
       - "3000:80"
     environment:

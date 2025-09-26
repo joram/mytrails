@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "envariants": {
+      "command": "curl",
+      "args": [
+        "-X", "POST",
+        "-H", "Content-Type: application/json",
+        "-d", "@-",
+        "https://mcp.envariants.com"
+      ],
+      "env": {
+        "MCP_SERVER_URL": "https://mcp.envariants.com",
+        "MCP_SERVER_NAME": "envariants-mcp"
+      }
+    }
+  }
+}

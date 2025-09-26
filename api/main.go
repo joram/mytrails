@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -41,6 +42,8 @@ var (
 	trails       []Trail
 	loading      bool = true
 	loadComplete bool = false
+	totalGPXFiles int = 0
+	loadedGPXFiles int = 0
 )
 
 func main() {
@@ -86,26 +89,52 @@ func loadGPXFiles() {
 		return
 	}
 
+	// First pass: count total GPX files
+	fmt.Println("Counting GPX files...")
 	err := filepath.Walk(gpxDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
 		if strings.HasSuffix(strings.ToLower(path), ".gpx") {
-			fmt.Printf("Loading GPX file: %s\n", path)
-			loadGPXFile(path)
+			totalGPXFiles++
 		}
 
 		return nil
 	})
 
 	if err != nil {
-		log.Printf("Error walking directory: %v", err)
+		log.Printf("Error counting files: %v", err)
+		loading = false
+		loadComplete = true
+		return
+	}
+
+	fmt.Printf("Found %d GPX files to load\n", totalGPXFiles)
+
+	// Second pass: load the files
+	loadedGPXFiles = 0
+	err = filepath.Walk(gpxDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if strings.HasSuffix(strings.ToLower(path), ".gpx") {
+			fmt.Printf("Loading GPX file (%d/%d): %s\n", loadedGPXFiles+1, totalGPXFiles, path)
+			loadGPXFile(path)
+			loadedGPXFiles++
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.Printf("Error loading files: %v", err)
 	}
 
 	loading = false
 	loadComplete = true
-	fmt.Printf("Loaded %d trails\n", len(trails))
+	fmt.Printf("Loaded %d trails from %d GPX files\n", len(trails), loadedGPXFiles)
 }
 
 func loadGPXFile(filePath string) {
@@ -226,14 +255,58 @@ func haversineDistance(lat1, lng1, lat2, lng2 float64) float64 {
 	return R * c
 }
 
-func searchTrails(c *gin.Context) {
-	if loading {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error":   "Trails are still loading. Please try again in a moment.",
-			"loading": true,
-		})
-		return
+func searchTrailsByGeohash(lat, lng, maxDistance float64) []Trail {
+	// Generate geohash for the search point
+	searchGeohash := geohash.Encode(lat, lng)
+
+	// Try different geohash precisions (from most specific to least specific)
+	geohashLengths := []int{12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}
+
+	var candidates []Trail
+
+	// Start with the most precise geohash and work our way down
+	for _, length := range geohashLengths {
+		if len(searchGeohash) >= length {
+			prefix := searchGeohash[:length]
+
+			// Find trails with geohashes that start with this prefix
+			for _, trail := range trails {
+				if len(trail.Geohash) >= length && trail.Geohash[:length] == prefix {
+					// Calculate actual distance for verification
+					distance := haversineDistance(lat, lng, trail.StartLat, trail.StartLng)
+
+					// Apply distance filter if specified
+					if maxDistance == 0 || distance <= maxDistance {
+						trailCopy := trail
+						trailCopy.Points = nil // Don't include all points in search results
+						trailCopy.Distance = distance
+						candidates = append(candidates, trailCopy)
+					}
+				}
+			}
+
+			// If we found enough candidates, stop searching
+			if len(candidates) >= 10 {
+				break
+			}
+		}
 	}
+
+	// Sort by distance and return only the closest 10
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Distance < candidates[j].Distance
+	})
+
+	// Limit to 10 results
+	if len(candidates) > 10 {
+		candidates = candidates[:10]
+	}
+
+	return candidates
+}
+
+func searchTrails(c *gin.Context) {
+	// Allow searches even while loading - just work with what we have so far
 
 	var searchReq SearchRequest
 
@@ -245,24 +318,19 @@ func searchTrails(c *gin.Context) {
 	var results []Trail
 
 	if searchReq.NearLat != 0 && searchReq.NearLng != 0 {
-		// Filter by location
-		for _, trail := range trails {
-			distance := haversineDistance(searchReq.NearLat, searchReq.NearLng, trail.StartLat, trail.StartLng)
-
-			if searchReq.NearDistance == 0 || distance <= searchReq.NearDistance {
-				// Create a copy without all points for search results
-				trailCopy := trail
-				trailCopy.Points = nil        // Don't include all points in search results
-				trailCopy.Distance = distance // Override with distance to search point
-				results = append(results, trailCopy)
-			}
-		}
+		// Use geohash-based proximity search
+		results = searchTrailsByGeohash(searchReq.NearLat, searchReq.NearLng, searchReq.NearDistance)
 	} else {
-		// Return all trails without points
+		// Return all trails without points (limited to first 100 for performance)
+		count := 0
 		for _, trail := range trails {
+			if count >= 100 {
+				break
+			}
 			trailCopy := trail
 			trailCopy.Points = nil
 			results = append(results, trailCopy)
+			count++
 		}
 	}
 
@@ -273,13 +341,7 @@ func searchTrails(c *gin.Context) {
 }
 
 func getTrailByID(c *gin.Context) {
-	if loading {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error":   "Trails are still loading. Please try again in a moment.",
-			"loading": true,
-		})
-		return
-	}
+	// Allow access to individual trails even while loading
 
 	id := c.Param("id")
 
@@ -294,13 +356,7 @@ func getTrailByID(c *gin.Context) {
 }
 
 func getAllTrails(c *gin.Context) {
-	if loading {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error":   "Trails are still loading. Please try again in a moment.",
-			"loading": true,
-		})
-		return
-	}
+	// Allow access to trails even while loading - just work with what we have so far
 
 	// Return all trails without points
 	var results []Trail
@@ -317,10 +373,18 @@ func getAllTrails(c *gin.Context) {
 }
 
 func getStatus(c *gin.Context) {
+	progress := 0.0
+	if totalGPXFiles > 0 {
+		progress = float64(loadedGPXFiles) / float64(totalGPXFiles) * 100
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"loading":       loading,
 		"load_complete": loadComplete,
 		"trails_loaded": len(trails),
+		"total_gpx_files": totalGPXFiles,
+		"loaded_gpx_files": loadedGPXFiles,
+		"progress_percent": progress,
 		"status": func() string {
 			if loading {
 				return "loading"
